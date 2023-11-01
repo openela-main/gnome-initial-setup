@@ -1,0 +1,974 @@
+From de07cbc69b8f64b1a7708f454f029814d3c48b10 Mon Sep 17 00:00:00 2001
+From: Michael Catanzaro <mcatanzaro@igalia.com>
+Date: Thu, 15 Feb 2018 21:08:38 -0600
+Subject: [PATCH] Reduce initial setup redundancy
+
+This contains patches from these bugs:
+
+https://bugzilla.gnome.org/show_bug.cgi?id=793501
+https://bugzilla.gnome.org/show_bug.cgi?id=794166
+
+modified a bit to not conflict with each other.
+
+This is a combination of work by Peng Wu and Michael Catanzaro.
+---
+ gnome-initial-setup/gis-assistant.c                |   3 +-
+ gnome-initial-setup/gis-page.c                     |   8 +
+ gnome-initial-setup/gis-page.h                     |   2 +
+ gnome-initial-setup/gnome-initial-setup.c          |  77 +++++++--
+ .../pages/account/gis-account-page.h               |   2 -
+ .../pages/account/gis-account-pages.c              |   9 +-
+ .../pages/account/gis-account-pages.h              |   2 +-
+ gnome-initial-setup/pages/eulas/gis-eula-pages.c   |  16 +-
+ gnome-initial-setup/pages/eulas/gis-eula-pages.h   |   2 +-
+ gnome-initial-setup/pages/goa/gis-goa-page.c       |   9 +-
+ gnome-initial-setup/pages/goa/gis-goa-page.h       |   2 +-
+ .../pages/keyboard/gis-keyboard-page.c             | 185 ++++++++++++++++-----
+ .../pages/keyboard/gis-keyboard-page.h             |   2 +-
+ .../pages/language/gis-language-page.c             |  24 ++-
+ .../pages/language/gis-language-page.h             |   3 +-
+ .../pages/language/gis-language-page.ui            |   4 +-
+ .../pages/network/gis-network-page.c               |   9 +-
+ .../pages/network/gis-network-page.h               |   2 +-
+ .../pages/password/gis-password-page.c             |   9 +-
+ .../pages/password/gis-password-page.h             |   2 +-
+ .../pages/privacy/gis-privacy-page.c               |   9 +-
+ .../pages/privacy/gis-privacy-page.h               |   2 +-
+ gnome-initial-setup/pages/region/gis-region-page.c |   9 +-
+ gnome-initial-setup/pages/region/gis-region-page.h |   2 +-
+ .../pages/software/gis-software-page.c             |  14 +-
+ .../pages/software/gis-software-page.h             |   2 +-
+ .../pages/summary/gis-summary-page.c               |   9 +-
+ .../pages/summary/gis-summary-page.h               |   2 +-
+ .../pages/timezone/gis-timezone-page.c             |   9 +-
+ .../pages/timezone/gis-timezone-page.h             |   2 +-
+ 30 files changed, 296 insertions(+), 136 deletions(-)
+
+diff --git a/gnome-initial-setup/gis-assistant.c b/gnome-initial-setup/gis-assistant.c
+index 37ed563..0a3bd05 100644
+--- a/gnome-initial-setup/gis-assistant.c
++++ b/gnome-initial-setup/gis-assistant.c
+@@ -302,7 +302,8 @@ gis_assistant_add_page (GisAssistant *assistant,
+ 
+   gtk_container_add (GTK_CONTAINER (priv->stack), GTK_WIDGET (page));
+ 
+-  if (priv->current_page->assistant_priv->link == link->prev)
++  if (priv->current_page &&
++      priv->current_page->assistant_priv->link == link->prev)
+     update_navigation_buttons (assistant);
+ }
+ 
+diff --git a/gnome-initial-setup/gis-page.c b/gnome-initial-setup/gis-page.c
+index e28f573..8564935 100644
+--- a/gnome-initial-setup/gis-page.c
++++ b/gnome-initial-setup/gis-page.c
+@@ -382,3 +382,11 @@ gis_page_shown (GisPage *page)
+   if (GIS_PAGE_GET_CLASS (page)->shown)
+     GIS_PAGE_GET_CLASS (page)->shown (page);
+ }
++
++gboolean
++gis_page_skip (GisPage *page)
++{
++  if (GIS_PAGE_GET_CLASS (page)->skip)
++    return GIS_PAGE_GET_CLASS (page)->skip (page);
++  return TRUE;
++}
+diff --git a/gnome-initial-setup/gis-page.h b/gnome-initial-setup/gis-page.h
+index 02e3085..1f11578 100644
+--- a/gnome-initial-setup/gis-page.h
++++ b/gnome-initial-setup/gis-page.h
+@@ -60,6 +60,7 @@ struct _GisPageClass
+                          GCancellable *cancellable);
+   void         (*save_data) (GisPage *page);
+   void         (*shown) (GisPage *page);
++  gboolean     (*skip) (GisPage *page);
+ };
+ 
+ GType gis_page_get_type (void);
+@@ -80,6 +81,7 @@ void         gis_page_apply_complete (GisPage *page, gboolean valid);
+ gboolean     gis_page_get_applying (GisPage *page);
+ void         gis_page_save_data (GisPage *page);
+ void         gis_page_shown (GisPage *page);
++gboolean     gis_page_skip (GisPage *page);
+ 
+ G_END_DECLS
+ 
+diff --git a/gnome-initial-setup/gnome-initial-setup.c b/gnome-initial-setup/gnome-initial-setup.c
+index 5a988a3..4558810 100644
+--- a/gnome-initial-setup/gnome-initial-setup.c
++++ b/gnome-initial-setup/gnome-initial-setup.c
+@@ -50,11 +50,15 @@
+ #include "pages/summary/gis-summary-page.h"
+ 
+ #define VENDOR_PAGES_GROUP "pages"
+-#define VENDOR_PAGES_SKIP_KEY "skip"
++#define VENDOR_SKIP_KEY "skip"
++#define VENDOR_NEW_USER_ONLY_KEY "new_user_only"
++#define VENDOR_EXISTING_USER_ONLY_KEY "existing_user_only"
+ 
+ static gboolean force_existing_user_mode;
+ 
+-typedef void (*PreparePage) (GisDriver *driver);
++static GPtrArray *skipped_pages;
++
++typedef GisPage *(*PreparePage) (GisDriver *driver);
+ 
+ typedef struct {
+   const gchar *page_id;
+@@ -101,21 +105,40 @@ should_skip_page (GisDriver    *driver,
+ }
+ 
+ static gchar **
+-pages_to_skip_from_file (void)
++strv_append (gchar **a,
++             gchar **b)
++{
++  guint n = g_strv_length (a);
++  guint m = g_strv_length (b);
++
++  a = g_renew (gchar *, a, n + m + 1);
++  for (guint i = 0; i < m; i++)
++    a[n + i] = g_strdup (b[i]);
++  a[n + m] = NULL;
++
++  return a;
++}
++
++static gchar **
++pages_to_skip_from_file (gboolean is_new_user)
+ {
+   GKeyFile *skip_pages_file;
+   gchar **skip_pages = NULL;
++  gchar **additional_skip_pages = NULL;
+   GError *error = NULL;
+ 
+   /* VENDOR_CONF_FILE points to a keyfile containing vendor customization
+    * options. This code will look for options under the "pages" group, and
+    * supports the following keys:
+-   *   - skip (optional): list of pages to be skipped.
++   *   - skip (optional): list of pages to be skipped always
++   *   - new_user_only (optional): list of pages to be skipped in existing user mode
++   *   - existing_user_only (optional): list of pages to be skipped in new user mode
+    *
+-   * This is how this file would look on a vendor image:
++   * This is how this file might look on a vendor image:
+    *
+    *   [pages]
+-   *   skip=language
++   *   skip=timezone
++   *   existing_user_only=language;keyboard
+    */
+   skip_pages_file = g_key_file_new ();
+   if (!g_key_file_load_from_file (skip_pages_file, VENDOR_CONF_FILE,
+@@ -127,8 +150,20 @@ pages_to_skip_from_file (void)
+     goto out;
+   }
+ 
+-  skip_pages = g_key_file_get_string_list (skip_pages_file, VENDOR_PAGES_GROUP,
+-                                           VENDOR_PAGES_SKIP_KEY, NULL, NULL);
++  skip_pages = g_key_file_get_string_list (skip_pages_file,
++                                           VENDOR_PAGES_GROUP,
++                                           VENDOR_SKIP_KEY, NULL, NULL);
++  additional_skip_pages = g_key_file_get_string_list (skip_pages_file,
++                                                      VENDOR_PAGES_GROUP,
++                                                      is_new_user ? VENDOR_EXISTING_USER_ONLY_KEY : VENDOR_NEW_USER_ONLY_KEY,
++                                                      NULL, NULL);
++
++  if (!skip_pages && additional_skip_pages) {
++    skip_pages = additional_skip_pages;
++  } else if (skip_pages && additional_skip_pages) {
++    skip_pages = strv_append (skip_pages, additional_skip_pages);
++    g_strfreev (additional_skip_pages);
++  }
+ 
+  out:
+   g_key_file_free (skip_pages_file);
+@@ -159,16 +194,14 @@ static void
+ rebuild_pages_cb (GisDriver *driver)
+ {
+   PageData *page_data;
++  GisPage *page;
+   GisAssistant *assistant;
+   GisPage *current_page;
+   gchar **skip_pages;
+-  gboolean is_new_user;
++  gboolean is_new_user, skipped;
+ 
+   assistant = gis_driver_get_assistant (driver);
+   current_page = gis_assistant_get_current_page (assistant);
+-
+-  skip_pages = pages_to_skip_from_file ();
+-
+   page_data = page_table;
+ 
+   if (current_page != NULL) {
+@@ -182,14 +215,23 @@ rebuild_pages_cb (GisDriver *driver)
+   }
+ 
+   is_new_user = (gis_driver_get_mode (driver) == GIS_DRIVER_MODE_NEW_USER);
++  skip_pages = pages_to_skip_from_file (is_new_user);
++
+   for (; page_data->page_id != NULL; ++page_data) {
+-    if (page_data->new_user_only && !is_new_user)
+-      continue;
++    skipped = FALSE;
++
++    if ((page_data->new_user_only && !is_new_user) ||
++        (should_skip_page (driver, page_data->page_id, skip_pages)))
++      skipped = TRUE;
+ 
+-    if (should_skip_page (driver, page_data->page_id, skip_pages))
++    page = page_data->prepare_page_func (driver);
++    if (!page)
+       continue;
+ 
+-    page_data->prepare_page_func (driver);
++    if (skipped && gis_page_skip (page))
++      g_ptr_array_add (skipped_pages, page);
++    else
++      gis_driver_add_page (driver, page);
+   }
+ 
+   g_strfreev (skip_pages);
+@@ -267,6 +309,7 @@ main (int argc, char *argv[])
+   }
+ #endif
+ 
++  skipped_pages = g_ptr_array_new_with_free_func ((GDestroyNotify)gtk_widget_destroy);
+   mode = get_mode ();
+ 
+   /* We only do this in existing-user mode, because if gdm launches us
+@@ -290,6 +333,8 @@ main (int argc, char *argv[])
+   g_signal_connect (driver, "rebuild-pages", G_CALLBACK (rebuild_pages_cb), NULL);
+   status = g_application_run (G_APPLICATION (driver), argc, argv);
+ 
++  g_ptr_array_free (skipped_pages, TRUE);
++
+   g_object_unref (driver);
+   g_option_context_free (context);
+   return status;
+diff --git a/gnome-initial-setup/pages/account/gis-account-page.h b/gnome-initial-setup/pages/account/gis-account-page.h
+index cc34304..7629e1a 100644
+--- a/gnome-initial-setup/pages/account/gis-account-page.h
++++ b/gnome-initial-setup/pages/account/gis-account-page.h
+@@ -50,8 +50,6 @@ struct _GisAccountPageClass
+ 
+ GType gis_account_page_get_type (void);
+ 
+-void gis_prepare_account_page (GisDriver *driver);
+-
+ G_END_DECLS
+ 
+ #endif /* __GIS_ACCOUNT_PAGE_H__ */
+diff --git a/gnome-initial-setup/pages/account/gis-account-pages.c b/gnome-initial-setup/pages/account/gis-account-pages.c
+index 5f4411b..d9cc8d9 100644
+--- a/gnome-initial-setup/pages/account/gis-account-pages.c
++++ b/gnome-initial-setup/pages/account/gis-account-pages.c
+@@ -23,11 +23,10 @@
+ #include "gis-account-pages.h"
+ #include "gis-account-page.h"
+ 
+-void
++GisPage *
+ gis_prepare_account_page (GisDriver *driver)
+ {
+-  gis_driver_add_page (driver,
+-                       g_object_new (GIS_TYPE_ACCOUNT_PAGE,
+-                                     "driver", driver,
+-                                     NULL));
++  return g_object_new (GIS_TYPE_ACCOUNT_PAGE,
++                       "driver", driver,
++                       NULL);
+ }
+diff --git a/gnome-initial-setup/pages/account/gis-account-pages.h b/gnome-initial-setup/pages/account/gis-account-pages.h
+index 20d615a..394421b 100644
+--- a/gnome-initial-setup/pages/account/gis-account-pages.h
++++ b/gnome-initial-setup/pages/account/gis-account-pages.h
+@@ -28,7 +28,7 @@
+ 
+ G_BEGIN_DECLS
+ 
+-void gis_prepare_account_page (GisDriver *driver);
++GisPage *gis_prepare_account_page (GisDriver *driver);
+ 
+ G_END_DECLS
+ 
+diff --git a/gnome-initial-setup/pages/eulas/gis-eula-pages.c b/gnome-initial-setup/pages/eulas/gis-eula-pages.c
+index 8c989c2..3de6653 100644
+--- a/gnome-initial-setup/pages/eulas/gis-eula-pages.c
++++ b/gnome-initial-setup/pages/eulas/gis-eula-pages.c
+@@ -25,7 +25,7 @@
+ #include "gis-eula-pages.h"
+ #include "gis-eula-page.h"
+ 
+-void
++GisPage *
+ gis_prepare_eula_page (GisDriver *driver)
+ {
+   gchar *eulas_dir_path;
+@@ -33,6 +33,7 @@ gis_prepare_eula_page (GisDriver *driver)
+   GError *error = NULL;
+   GFileEnumerator *enumerator = NULL;
+   GFileInfo *info;
++  GisPage *page = NULL;
+ 
+   eulas_dir_path = g_build_filename (PKGDATADIR, "eulas", NULL);
+   eulas_dir = g_file_new_for_path (eulas_dir_path);
+@@ -52,11 +53,12 @@ gis_prepare_eula_page (GisDriver *driver)
+ 
+   while ((info = g_file_enumerator_next_file (enumerator, NULL, &error)) != NULL) {
+     GFile *eula = g_file_enumerator_get_child (enumerator, info);
+-    gis_driver_add_page (driver,
+-                         g_object_new (GIS_TYPE_EULA_PAGE,
+-                                       "driver", driver,
+-                                       "eula", eula,
+-                                       NULL));
++
++    page = g_object_new (GIS_TYPE_EULA_PAGE,
++                         "driver", driver,
++                         "eula", eula,
++                         NULL);
++
+     g_object_unref (eula);
+   }
+ 
+@@ -71,4 +73,6 @@ gis_prepare_eula_page (GisDriver *driver)
+ 
+   g_object_unref (eulas_dir);
+   g_clear_object (&enumerator);
++
++  return page;
+ }
+diff --git a/gnome-initial-setup/pages/eulas/gis-eula-pages.h b/gnome-initial-setup/pages/eulas/gis-eula-pages.h
+index 9424a6d..54906bc 100644
+--- a/gnome-initial-setup/pages/eulas/gis-eula-pages.h
++++ b/gnome-initial-setup/pages/eulas/gis-eula-pages.h
+@@ -28,7 +28,7 @@
+ 
+ G_BEGIN_DECLS
+ 
+-void gis_prepare_eula_page (GisDriver *driver);
++GisPage *gis_prepare_eula_page (GisDriver *driver);
+ 
+ G_END_DECLS
+ 
+diff --git a/gnome-initial-setup/pages/goa/gis-goa-page.c b/gnome-initial-setup/pages/goa/gis-goa-page.c
+index fcdcabe..3ed4e98 100644
+--- a/gnome-initial-setup/pages/goa/gis-goa-page.c
++++ b/gnome-initial-setup/pages/goa/gis-goa-page.c
+@@ -363,11 +363,10 @@ gis_goa_page_init (GisGoaPage *page)
+   gtk_widget_init_template (GTK_WIDGET (page));
+ }
+ 
+-void
++GisPage *
+ gis_prepare_goa_page (GisDriver *driver)
+ {
+-  gis_driver_add_page (driver,
+-                       g_object_new (GIS_TYPE_GOA_PAGE,
+-                                     "driver", driver,
+-                                     NULL));
++  return g_object_new (GIS_TYPE_GOA_PAGE,
++                       "driver", driver,
++                       NULL);
+ }
+diff --git a/gnome-initial-setup/pages/goa/gis-goa-page.h b/gnome-initial-setup/pages/goa/gis-goa-page.h
+index e65aa28..31918bf 100644
+--- a/gnome-initial-setup/pages/goa/gis-goa-page.h
++++ b/gnome-initial-setup/pages/goa/gis-goa-page.h
+@@ -48,7 +48,7 @@ struct _GisGoaPageClass
+ 
+ GType gis_goa_page_get_type (void);
+ 
+-void gis_prepare_goa_page (GisDriver *driver);
++GisPage *gis_prepare_goa_page (GisDriver *driver);
+ 
+ G_END_DECLS
+ 
+diff --git a/gnome-initial-setup/pages/keyboard/gis-keyboard-page.c b/gnome-initial-setup/pages/keyboard/gis-keyboard-page.c
+index 91d9a25..445da30 100644
+--- a/gnome-initial-setup/pages/keyboard/gis-keyboard-page.c
++++ b/gnome-initial-setup/pages/keyboard/gis-keyboard-page.c
+@@ -30,6 +30,9 @@
+ #include <gtk/gtk.h>
+ #include <polkit/polkit.h>
+ 
++#define GNOME_DESKTOP_USE_UNSTABLE_API
++#include <libgnome-desktop/gnome-languages.h>
++
+ #include "gis-keyboard-page.h"
+ #include "keyboard-resources.h"
+ #include "cc-input-chooser.h"
+@@ -208,53 +211,145 @@ gis_keyboard_page_apply (GisPage      *page,
+         return FALSE;
+ }
+ 
++static GSList *
++get_localed_input (GDBusProxy *proxy)
++{
++    GVariant *v;
++    const gchar *s;
++    gchar *id;
++    guint i, n;
++    gchar **layouts = NULL;
++    gchar **variants = NULL;
++    GSList *sources = NULL;
++
++    if (!proxy)
++        return NULL;
++
++    v = g_dbus_proxy_get_cached_property (proxy, "X11Layout");
++    if (v) {
++        s = g_variant_get_string (v, NULL);
++        layouts = g_strsplit (s, ",", -1);
++        g_variant_unref (v);
++    }
++
++    v = g_dbus_proxy_get_cached_property (proxy, "X11Variant");
++    if (v) {
++        s = g_variant_get_string (v, NULL);
++        if (s && *s)
++            variants = g_strsplit (s, ",", -1);
++        g_variant_unref (v);
++    }
++
++    if (variants && variants[0])
++        n = MIN (g_strv_length (layouts), g_strv_length (variants));
++    else if (layouts && layouts[0])
++        n = g_strv_length (layouts);
++    else
++        n = 0;
++
++    for (i = 0; i < n && layouts[i][0]; i++) {
++        if (variants && variants[i] && variants[i][0])
++            id = g_strdup_printf ("%s+%s", layouts[i], variants[i]);
++        else
++            id = g_strdup (layouts[i]);
++        sources = g_slist_prepend (sources, id);
++    }
++
++    g_strfreev (variants);
++    g_strfreev (layouts);
++
++    return sources;
++}
++
+ static void
+-load_localed_input (GisKeyboardPage *self)
++add_default_keyboard_layout (GDBusProxy      *proxy,
++                             GVariantBuilder *builder)
+ {
+-	GisKeyboardPagePrivate *priv = gis_keyboard_page_get_instance_private (self);
+-        GVariant *v;
+-        const gchar *s;
+-        gchar *id;
+-        guint i, n;
+-        gchar **layouts = NULL;
+-        gchar **variants = NULL;
+-        GSList *sources = NULL;
++    GSList *sources = get_localed_input (proxy);
++    sources = g_slist_reverse (sources);
+ 
+-        if (!priv->localed)
+-                return;
++    for (; sources; sources = sources->next)
++        g_variant_builder_add (builder, "(ss)", "xkb",
++                               (const gchar *) sources->data);
+ 
+-        v = g_dbus_proxy_get_cached_property (priv->localed, "X11Layout");
+-        if (v) {
+-                s = g_variant_get_string (v, NULL);
+-                layouts = g_strsplit (s, ",", -1);
+-                g_variant_unref (v);
+-        }
++    g_slist_free_full (sources, g_free);
++}
+ 
+-        v = g_dbus_proxy_get_cached_property (priv->localed, "X11Variant");
+-        if (v) {
+-                s = g_variant_get_string (v, NULL);
+-                if (s && *s)
+-                        variants = g_strsplit (s, ",", -1);
+-                g_variant_unref (v);
+-        }
++static void
++add_default_input_sources (GisKeyboardPage *self,
++                           GDBusProxy      *proxy)
++{
++    const gchar *type;
++    const gchar *id;
++    const gchar * const *locales;
++    const gchar *language;
++    GVariantBuilder builder;
++    GSettings *input_settings;
++
++    input_settings = g_settings_new (GNOME_DESKTOP_INPUT_SOURCES_DIR);
++    g_variant_builder_init (&builder, G_VARIANT_TYPE ("a(ss)"));
++
++    add_default_keyboard_layout (proxy, &builder);
++
++    /* add other input sources */
++    locales = g_get_language_names ();
++    language = locales[0];
++    if (gnome_get_input_source_from_locale (language, &type, &id)) {
++        if (!g_str_equal (type, "xkb"))
++            g_variant_builder_add (&builder, "(ss)", type, id);
++    }
++
++    g_settings_delay (input_settings);
++    g_settings_set_value (input_settings, KEY_INPUT_SOURCES, g_variant_builder_end (&builder));
++    g_settings_set_uint (input_settings, KEY_CURRENT_INPUT_SOURCE, 0);
++    g_settings_apply (input_settings);
++
++    g_object_unref (input_settings);
++}
+ 
+-        if (variants && variants[0])
+-                n = MIN (g_strv_length (layouts), g_strv_length (variants));
+-        else if (layouts && layouts[0])
+-                n = g_strv_length (layouts);
+-        else
+-                n = 0;
+-
+-        for (i = 0; i < n && layouts[i][0]; i++) {
+-                if (variants && variants[i] && variants[i][0])
+-                        id = g_strdup_printf ("%s+%s", layouts[i], variants[i]);
+-                else
+-                        id = g_strdup (layouts[i]);
+-                sources = g_slist_prepend (sources, id);
+-        }
++static void
++skip_proxy_ready (GObject      *source,
++                  GAsyncResult *res,
++                  gpointer      data)
++{
++    GisKeyboardPage *self = data;
++    GDBusProxy *proxy;
++    GError *error = NULL;
++
++    proxy = g_dbus_proxy_new_finish (res, &error);
++
++    if (!proxy) {
++        if (!g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
++                g_warning ("Failed to contact localed: %s", error->message);
++        g_error_free (error);
++        return;
++    }
++
++    add_default_input_sources (self, proxy);
++
++    g_object_unref (proxy);
++}
+ 
+-        g_strfreev (variants);
+-        g_strfreev (layouts);
++static gboolean
++gis_keyboard_page_skip (GisPage *self)
++{
++    g_dbus_proxy_new_for_bus (G_BUS_TYPE_SYSTEM,
++                              G_DBUS_PROXY_FLAGS_GET_INVALIDATED_PROPERTIES,
++                              NULL,
++                              "org.freedesktop.locale1",
++                              "/org/freedesktop/locale1",
++                              "org.freedesktop.locale1",
++                              NULL,
++                              (GAsyncReadyCallback) skip_proxy_ready,
++                              self);
++    return TRUE;
++}
++
++static void
++load_localed_input (GisKeyboardPage *self)
++{
++	GisKeyboardPagePrivate *priv = gis_keyboard_page_get_instance_private (self);
++        GSList * sources = get_localed_input (priv->localed);
+ 
+         /* These will be added silently after the user selection when
+          * writing out the settings. */
+@@ -375,6 +470,7 @@ gis_keyboard_page_class_init (GisKeyboardPageClass * klass)
+ 
+         page_class->page_id = PAGE_ID;
+         page_class->apply = gis_keyboard_page_apply;
++        page_class->skip = gis_keyboard_page_skip;
+         page_class->locale_changed = gis_keyboard_page_locale_changed;
+         object_class->constructed = gis_keyboard_page_constructed;
+ 	object_class->finalize = gis_keyboard_page_finalize;
+@@ -389,11 +485,10 @@ gis_keyboard_page_init (GisKeyboardPage *self)
+         gtk_widget_init_template (GTK_WIDGET (self));
+ }
+ 
+-void
++GisPage *
+ gis_prepare_keyboard_page (GisDriver *driver)
+ {
+-  gis_driver_add_page (driver,
+-                       g_object_new (GIS_TYPE_KEYBOARD_PAGE,
+-                                     "driver", driver,
+-                                     NULL));
++  return g_object_new (GIS_TYPE_KEYBOARD_PAGE,
++                       "driver", driver,
++                       NULL);
+ }
+diff --git a/gnome-initial-setup/pages/keyboard/gis-keyboard-page.h b/gnome-initial-setup/pages/keyboard/gis-keyboard-page.h
+index 832473f..d5710a0 100644
+--- a/gnome-initial-setup/pages/keyboard/gis-keyboard-page.h
++++ b/gnome-initial-setup/pages/keyboard/gis-keyboard-page.h
+@@ -63,7 +63,7 @@ struct _GisKeyboardPageClass
+ 
+ GType gis_keyboard_page_get_type (void) G_GNUC_CONST;
+ 
+-void gis_prepare_keyboard_page (GisDriver *driver);
++GisPage *gis_prepare_keyboard_page (GisDriver *driver);
+ 
+ G_END_DECLS
+ 
+diff --git a/gnome-initial-setup/pages/language/gis-language-page.c b/gnome-initial-setup/pages/language/gis-language-page.c
+index 6e246f9..c5f895c 100644
+--- a/gnome-initial-setup/pages/language/gis-language-page.c
++++ b/gnome-initial-setup/pages/language/gis-language-page.c
+@@ -267,6 +267,8 @@ gis_language_page_constructed (GObject *object)
+ 
+   update_distro_logo (page);
+ 
++  gtk_widget_show (priv->language_chooser);
++
+   g_signal_connect (priv->language_chooser, "notify::language",
+                     G_CALLBACK (language_changed), page);
+   g_signal_connect (priv->language_chooser, "confirm",
+@@ -288,7 +290,7 @@ gis_language_page_constructed (GObject *object)
+                         (GAsyncReadyCallback) localed_proxy_ready,
+                         object);
+       g_object_unref (bus);
+-  }
++    }
+ 
+   gis_page_set_complete (GIS_PAGE (page), TRUE);
+   gtk_widget_show (GTK_WIDGET (page));
+@@ -300,6 +302,16 @@ gis_language_page_locale_changed (GisPage *page)
+   gis_page_set_title (GIS_PAGE (page), _("Welcome"));
+ }
+ 
++static gboolean
++gis_language_page_skip (GisPage *page)
++{
++  GisLanguagePagePrivate *priv = gis_language_page_get_instance_private (GIS_LANGUAGE_PAGE (page));
++
++  gtk_widget_hide (priv->language_chooser);
++
++  return FALSE;
++}
++
+ static void
+ gis_language_page_dispose (GObject *object)
+ {
+@@ -327,6 +339,7 @@ gis_language_page_class_init (GisLanguagePageClass *klass)
+ 
+   page_class->page_id = PAGE_ID;
+   page_class->locale_changed = gis_language_page_locale_changed;
++  page_class->skip = gis_language_page_skip;
+   object_class->constructed = gis_language_page_constructed;
+   object_class->dispose = gis_language_page_dispose;
+ }
+@@ -341,11 +354,10 @@ gis_language_page_init (GisLanguagePage *page)
+   gtk_widget_init_template (GTK_WIDGET (page));
+ }
+ 
+-void
++GisPage *
+ gis_prepare_language_page (GisDriver *driver)
+ {
+-  gis_driver_add_page (driver,
+-                       g_object_new (GIS_TYPE_LANGUAGE_PAGE,
+-                                     "driver", driver,
+-                                     NULL));
++  return g_object_new (GIS_TYPE_LANGUAGE_PAGE,
++                       "driver", driver,
++                       NULL);
+ }
+diff --git a/gnome-initial-setup/pages/language/gis-language-page.h b/gnome-initial-setup/pages/language/gis-language-page.h
+index 37b33ab..a5b78ff 100644
+--- a/gnome-initial-setup/pages/language/gis-language-page.h
++++ b/gnome-initial-setup/pages/language/gis-language-page.h
+@@ -50,7 +50,8 @@ struct _GisLanguagePageClass
+ 
+ GType gis_language_page_get_type (void);
+ 
+-void gis_prepare_language_page (GisDriver *driver);
++GisPage *gis_prepare_language_page (GisDriver *driver);
++GisPage *gis_prepare_language_page_without_language_selection (GisDriver *driver);
+ 
+ G_END_DECLS
+ 
+diff --git a/gnome-initial-setup/pages/language/gis-language-page.ui b/gnome-initial-setup/pages/language/gis-language-page.ui
+index 1b98a6d..d5e962a 100644
+--- a/gnome-initial-setup/pages/language/gis-language-page.ui
++++ b/gnome-initial-setup/pages/language/gis-language-page.ui
+@@ -7,7 +7,7 @@
+         <property name="visible">True</property>
+         <property name="orientation">vertical</property>
+         <property name="halign">center</property>
+-        <property name="valign">fill</property>
++        <property name="valign">center</property>
+         <child>
+           <object class="GtkImage" id="logo">
+             <property name="visible" bind-source="GisLanguagePage" bind-property="small-screen" bind-flags="invert-boolean|sync-create"/>
+@@ -30,7 +30,7 @@
+           <object class="CcLanguageChooser" id="language_chooser">
+             <property name="margin_bottom">18</property>
+             <property name="width_request">400</property>
+-            <property name="visible">True</property>
++            <property name="visible">False</property>
+             <property name="valign">start</property>
+           </object>
+         </child>
+diff --git a/gnome-initial-setup/pages/network/gis-network-page.c b/gnome-initial-setup/pages/network/gis-network-page.c
+index 0beae26..29fc523 100644
+--- a/gnome-initial-setup/pages/network/gis-network-page.c
++++ b/gnome-initial-setup/pages/network/gis-network-page.c
+@@ -691,11 +691,10 @@ gis_network_page_init (GisNetworkPage *page)
+   gtk_widget_init_template (GTK_WIDGET (page));
+ }
+ 
+-void
++GisPage *
+ gis_prepare_network_page (GisDriver *driver)
+ {
+-  gis_driver_add_page (driver,
+-                       g_object_new (GIS_TYPE_NETWORK_PAGE,
+-                                     "driver", driver,
+-                                     NULL));
++  return g_object_new (GIS_TYPE_NETWORK_PAGE,
++                       "driver", driver,
++                       NULL);
+ }
+diff --git a/gnome-initial-setup/pages/network/gis-network-page.h b/gnome-initial-setup/pages/network/gis-network-page.h
+index cdb1798..172b7d1 100644
+--- a/gnome-initial-setup/pages/network/gis-network-page.h
++++ b/gnome-initial-setup/pages/network/gis-network-page.h
+@@ -48,7 +48,7 @@ struct _GisNetworkPageClass
+ 
+ GType gis_network_page_get_type (void);
+ 
+-void gis_prepare_network_page (GisDriver *driver);
++GisPage *gis_prepare_network_page (GisDriver *driver);
+ 
+ G_END_DECLS
+ 
+diff --git a/gnome-initial-setup/pages/password/gis-password-page.c b/gnome-initial-setup/pages/password/gis-password-page.c
+index cefa30e..cf3db9e 100644
+--- a/gnome-initial-setup/pages/password/gis-password-page.c
++++ b/gnome-initial-setup/pages/password/gis-password-page.c
+@@ -304,12 +304,11 @@ gis_password_page_init (GisPasswordPage *page)
+   gtk_widget_init_template (GTK_WIDGET (page));
+ }
+ 
+-void
++GisPage *
+ gis_prepare_password_page (GisDriver *driver)
+ {
+-  gis_driver_add_page (driver,
+-                       g_object_new (GIS_TYPE_PASSWORD_PAGE,
+-                                     "driver", driver,
+-                                     NULL));
++  return g_object_new (GIS_TYPE_PASSWORD_PAGE,
++                       "driver", driver,
++                       NULL);
+ }
+ 
+diff --git a/gnome-initial-setup/pages/password/gis-password-page.h b/gnome-initial-setup/pages/password/gis-password-page.h
+index 59d22c7..954782f 100644
+--- a/gnome-initial-setup/pages/password/gis-password-page.h
++++ b/gnome-initial-setup/pages/password/gis-password-page.h
+@@ -50,7 +50,7 @@ struct _GisPasswordPageClass
+ 
+ GType gis_password_page_get_type (void);
+ 
+-void gis_prepare_password_page (GisDriver *driver);
++GisPage *gis_prepare_password_page (GisDriver *driver);
+ 
+ G_END_DECLS
+ 
+diff --git a/gnome-initial-setup/pages/privacy/gis-privacy-page.c b/gnome-initial-setup/pages/privacy/gis-privacy-page.c
+index f2af372..7d83d62 100644
+--- a/gnome-initial-setup/pages/privacy/gis-privacy-page.c
++++ b/gnome-initial-setup/pages/privacy/gis-privacy-page.c
+@@ -321,11 +321,10 @@ gis_privacy_page_init (GisPrivacyPage *page)
+   gtk_widget_init_template (GTK_WIDGET (page));
+ }
+ 
+-void
++GisPage *
+ gis_prepare_privacy_page (GisDriver *driver)
+ {
+-  gis_driver_add_page (driver,
+-                       g_object_new (GIS_TYPE_PRIVACY_PAGE,
+-                                     "driver", driver,
+-                                     NULL));
++  return g_object_new (GIS_TYPE_PRIVACY_PAGE,
++                       "driver", driver,
++                       NULL);
+ }
+diff --git a/gnome-initial-setup/pages/privacy/gis-privacy-page.h b/gnome-initial-setup/pages/privacy/gis-privacy-page.h
+index d814612..9596b36 100644
+--- a/gnome-initial-setup/pages/privacy/gis-privacy-page.h
++++ b/gnome-initial-setup/pages/privacy/gis-privacy-page.h
+@@ -50,7 +50,7 @@ struct _GisPrivacyPageClass
+ 
+ GType gis_privacy_page_get_type (void);
+ 
+-void gis_prepare_privacy_page (GisDriver *driver);
++GisPage *gis_prepare_privacy_page (GisDriver *driver);
+ 
+ G_END_DECLS
+ 
+diff --git a/gnome-initial-setup/pages/region/gis-region-page.c b/gnome-initial-setup/pages/region/gis-region-page.c
+index 6e90d57..5a31b9c 100644
+--- a/gnome-initial-setup/pages/region/gis-region-page.c
++++ b/gnome-initial-setup/pages/region/gis-region-page.c
+@@ -276,11 +276,10 @@ gis_region_page_init (GisRegionPage *page)
+   gtk_widget_init_template (GTK_WIDGET (page));
+ }
+ 
+-void
++GisPage *
+ gis_prepare_region_page (GisDriver *driver)
+ {
+-  gis_driver_add_page (driver,
+-                       g_object_new (GIS_TYPE_REGION_PAGE,
+-                                     "driver", driver,
+-                                     NULL));
++  return g_object_new (GIS_TYPE_REGION_PAGE,
++                       "driver", driver,
++                       NULL);
+ }
+diff --git a/gnome-initial-setup/pages/region/gis-region-page.h b/gnome-initial-setup/pages/region/gis-region-page.h
+index eca0204..b99c2fe 100644
+--- a/gnome-initial-setup/pages/region/gis-region-page.h
++++ b/gnome-initial-setup/pages/region/gis-region-page.h
+@@ -50,7 +50,7 @@ struct _GisRegionPageClass
+ 
+ GType gis_region_page_get_type (void);
+ 
+-void gis_prepare_region_page (GisDriver *driver);
++GisPage *gis_prepare_region_page (GisDriver *driver);
+ 
+ G_END_DECLS
+ 
+diff --git a/gnome-initial-setup/pages/software/gis-software-page.c b/gnome-initial-setup/pages/software/gis-software-page.c
+index 7c15a2c..f3e827a 100644
+--- a/gnome-initial-setup/pages/software/gis-software-page.c
++++ b/gnome-initial-setup/pages/software/gis-software-page.c
+@@ -244,22 +244,24 @@ gis_software_page_init (GisSoftwarePage *page)
+   gtk_widget_init_template (GTK_WIDGET (page));
+ }
+ 
+-void
++GisPage *
+ gis_prepare_software_page (GisDriver *driver)
+ {
+-#ifdef ENABLE_SOFTWARE_SOURCES
+   GSettingsSchemaSource *source;
+   GSettingsSchema *schema;
++  GisPage *page = NULL;
+ 
++#ifdef ENABLE_SOFTWARE_SOURCES
+   source = g_settings_schema_source_get_default ();
+   schema = g_settings_schema_source_lookup (source, "org.gnome.software", TRUE);
+   if (schema != NULL && g_settings_schema_has_key (schema, "show-nonfree-software"))
+-    gis_driver_add_page (driver,
+-                         g_object_new (GIS_TYPE_SOFTWARE_PAGE,
+-                                       "driver", driver,
+-                                       NULL));
++    page = g_object_new (GIS_TYPE_SOFTWARE_PAGE,
++                         "driver", driver,
++                         NULL);
+ 
+   if (schema != NULL)
+     g_settings_schema_unref (schema);
+ #endif
++
++  return page;
+ }
+diff --git a/gnome-initial-setup/pages/software/gis-software-page.h b/gnome-initial-setup/pages/software/gis-software-page.h
+index 6bceda1..8d15245 100644
+--- a/gnome-initial-setup/pages/software/gis-software-page.h
++++ b/gnome-initial-setup/pages/software/gis-software-page.h
+@@ -50,7 +50,7 @@ struct _GisSoftwarePageClass
+ 
+ GType gis_software_page_get_type (void);
+ 
+-void gis_prepare_software_page (GisDriver *driver);
++GisPage *gis_prepare_software_page (GisDriver *driver);
+ 
+ G_END_DECLS
+ 
+diff --git a/gnome-initial-setup/pages/summary/gis-summary-page.c b/gnome-initial-setup/pages/summary/gis-summary-page.c
+index 4261b92..f510f2f 100644
+--- a/gnome-initial-setup/pages/summary/gis-summary-page.c
++++ b/gnome-initial-setup/pages/summary/gis-summary-page.c
+@@ -361,11 +361,10 @@ gis_summary_page_init (GisSummaryPage *page)
+   gtk_widget_init_template (GTK_WIDGET (page));
+ }
+ 
+-void
++GisPage *
+ gis_prepare_summary_page (GisDriver *driver)
+ {
+-  gis_driver_add_page (driver,
+-                       g_object_new (GIS_TYPE_SUMMARY_PAGE,
+-                                     "driver", driver,
+-                                     NULL));
++  return g_object_new (GIS_TYPE_SUMMARY_PAGE,
++                       "driver", driver,
++                       NULL);
+ }
+diff --git a/gnome-initial-setup/pages/summary/gis-summary-page.h b/gnome-initial-setup/pages/summary/gis-summary-page.h
+index 0fe2274..20190f1 100644
+--- a/gnome-initial-setup/pages/summary/gis-summary-page.h
++++ b/gnome-initial-setup/pages/summary/gis-summary-page.h
+@@ -48,7 +48,7 @@ struct _GisSummaryPageClass
+ 
+ GType gis_summary_page_get_type (void);
+ 
+-void gis_prepare_summary_page (GisDriver *driver);
++GisPage *gis_prepare_summary_page (GisDriver *driver);
+ 
+ G_END_DECLS
+ 
+diff --git a/gnome-initial-setup/pages/timezone/gis-timezone-page.c b/gnome-initial-setup/pages/timezone/gis-timezone-page.c
+index a090db2..0775d98 100644
+--- a/gnome-initial-setup/pages/timezone/gis-timezone-page.c
++++ b/gnome-initial-setup/pages/timezone/gis-timezone-page.c
+@@ -462,11 +462,10 @@ gis_timezone_page_init (GisTimezonePage *page)
+   gtk_widget_init_template (GTK_WIDGET (page));
+ }
+ 
+-void
++GisPage *
+ gis_prepare_timezone_page (GisDriver *driver)
+ {
+-  gis_driver_add_page (driver,
+-                       g_object_new (GIS_TYPE_TIMEZONE_PAGE,
+-                                     "driver", driver,
+-                                     NULL));
++  return g_object_new (GIS_TYPE_TIMEZONE_PAGE,
++                       "driver", driver,
++                       NULL);
+ }
+diff --git a/gnome-initial-setup/pages/timezone/gis-timezone-page.h b/gnome-initial-setup/pages/timezone/gis-timezone-page.h
+index 5e75256..e9ba8ed 100644
+--- a/gnome-initial-setup/pages/timezone/gis-timezone-page.h
++++ b/gnome-initial-setup/pages/timezone/gis-timezone-page.h
+@@ -50,7 +50,7 @@ struct _GisTimezonePageClass
+ 
+ GType gis_timezone_page_get_type (void);
+ 
+-void gis_prepare_timezone_page (GisDriver *driver);
++GisPage *gis_prepare_timezone_page (GisDriver *driver);
+ 
+ G_END_DECLS
+ 
+-- 
+2.14.3
+
