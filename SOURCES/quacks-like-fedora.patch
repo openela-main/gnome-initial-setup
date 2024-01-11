@@ -1,0 +1,24 @@
+diff -up gnome-initial-setup-3.28.0/gnome-initial-setup/pages/language/gis-language-page.c.quacks_like_fedora gnome-initial-setup-3.28.0/gnome-initial-setup/pages/language/gis-language-page.c
+--- gnome-initial-setup-3.28.0/gnome-initial-setup/pages/language/gis-language-page.c.quacks_like_fedora	2019-02-18 11:06:22.404874101 -0500
++++ gnome-initial-setup-3.28.0/gnome-initial-setup/pages/language/gis-language-page.c	2019-02-18 13:29:59.069513421 -0500
+@@ -227,11 +227,18 @@ update_distro_logo (GisLanguagePage *pag
+ 
+   if (g_file_get_contents ("/etc/os-release", &buffer, NULL, NULL))
+     {
+-      id = get_item (buffer, "ID");
++      id = get_item (buffer, "ID_LIKE");
++
++      if (id == NULL)
++        id = get_item (buffer, "ID");
++
+       g_free (buffer);
+     }
+ 
+-  if (g_strcmp0 (id, "fedora") == 0)
++  if (id != NULL &&
++      (strcmp (id, "fedora") == 0 ||
++       strstr (id, " fedora") != NULL ||
++       strstr (id, "fedora ") != NULL))
+     {
+       g_object_set (priv->logo, "icon-name", "fedora-logo-icon", NULL);
+     }

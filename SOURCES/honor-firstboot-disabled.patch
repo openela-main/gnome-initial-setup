@@ -1,0 +1,88 @@
+From b2659246f3e2afcbf51a92ee6839775de4e6487a Mon Sep 17 00:00:00 2001
+From: Rui Matos <tiagomatos@gmail.com>
+Date: Mon, 23 Jan 2017 19:42:44 +0100
+Subject: [PATCH] Exit gracefully if we are disabled systemwide
+
+Sysadmins might want to disable any kind of initial setup for their
+users, perhaps because they pre-configure their environments. We
+should provide an easy way to do it.
+
+At least the anaconda installer provides an option to skip any kind
+post-install setup tools so, for now we're only adding support for
+that but more might be added in the future.
+
+https://bugzilla.gnome.org/show_bug.cgi?id=777707
+---
+ gnome-initial-setup/Makefile.am           |  3 ++-
+ gnome-initial-setup/gnome-initial-setup.c | 34 +++++++++++++++++++++++++++++++
+ 2 files changed, 36 insertions(+), 1 deletion(-)
+
+diff --git a/gnome-initial-setup/Makefile.am b/gnome-initial-setup/Makefile.am
+index d275dda..465b598 100644
+--- a/gnome-initial-setup/Makefile.am
++++ b/gnome-initial-setup/Makefile.am
+@@ -11,7 +11,8 @@ AM_CPPFLAGS = \
+ 	-DUIDIR="\"$(uidir)\"" \
+ 	-DGNOMELOCALEDIR=\""$(datadir)/locale"\" \
+ 	-DLIBLOCALEDIR=\""$(prefix)/lib/locale"\" \
+-	-DDATADIR=\""$(datadir)"\"
++	-DDATADIR=\""$(datadir)"\" \
++	-DSYSCONFDIR=\""$(sysconfdir)"\"
+ 
+ libexec_PROGRAMS = gnome-initial-setup gnome-initial-setup-copy-worker
+ 
+diff --git a/gnome-initial-setup/gnome-initial-setup.c b/gnome-initial-setup/gnome-initial-setup.c
+index 2ec91b9..10b5f84 100644
+--- a/gnome-initial-setup/gnome-initial-setup.c
++++ b/gnome-initial-setup/gnome-initial-setup.c
+@@ -186,6 +186,31 @@ get_mode (void)
+     return GIS_DRIVER_MODE_NEW_USER;
+ }
+ 
++static gboolean
++initial_setup_disabled_by_anaconda (void)
++{
++  GKeyFile *key_file;
++  const gchar *file_name = SYSCONFDIR "/sysconfig/anaconda";
++  gboolean disabled = FALSE;
++  GError *error = NULL;
++
++  key_file = g_key_file_new ();
++  if (!g_key_file_load_from_file (key_file, file_name, G_KEY_FILE_NONE, &error)) {
++    if (!g_error_matches (error, G_FILE_ERROR, G_FILE_ERROR_NOENT) &&
++        !g_error_matches (error, G_KEY_FILE_ERROR, G_KEY_FILE_ERROR_NOT_FOUND)) {
++      g_warning ("Could not read %s: %s", file_name, error->message);
++    }
++    g_error_free (error);
++    goto out;
++  }
++
++  disabled = g_key_file_get_boolean (key_file, "General",
++                                     "post_install_tools_disabled", NULL);
++ out:
++  g_key_file_unref (key_file);
++  return disabled;
++}
++
+ int
+ main (int argc, char *argv[])
+ {
+@@ -226,6 +251,15 @@ main (int argc, char *argv[])
+ 
+   mode = get_mode ();
+ 
++  /* We only do this in existing-user mode, because if gdm launches us
++   * in new-user mode and we just exit, gdm's special g-i-s session
++   * never terminates. */
++  if (initial_setup_disabled_by_anaconda () &&
++      mode == GIS_DRIVER_MODE_EXISTING_USER) {
++    gis_ensure_stamp_files ();
++    exit (EXIT_SUCCESS);
++  }
++
+   /* When we are running as the gnome-initial-setup user we
+    * dont have a normal user session and need to initialize
+    * the keyring manually so that we can pass the credentials
+-- 
+2.9.3
+
