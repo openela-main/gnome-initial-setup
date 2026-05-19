@@ -8,7 +8,7 @@
 
 Name:           gnome-initial-setup
 Version:        40.4
-Release:        3%{?dist}
+Release:        4%{?dist}
 Summary:        Bootstrapping your OS
 
 License:        GPLv2+
@@ -18,6 +18,8 @@ Source1:        vendor.conf
 
 # https://bugzilla.redhat.com/show_bug.cgi?id=2097848
 Patch0:         timezones.patch
+# https://issues.redhat.com/browse/RHEL-70622
+Patch1:         fix-username-validation.patch
 
 BuildRequires:  meson
 BuildRequires:  gcc
@@ -108,6 +110,10 @@ useradd -rM -d /run/gnome-initial-setup/ -s /sbin/nologin %{name} &>/dev/null ||
 %{_datadir}/gnome-initial-setup/vendor.conf
 
 %changelog
+* Tue Nov 25 2025 Nieves Montero <nmontero@redhat.com> - 40.4-4
+- Add patch to fix the username validation
+  Resolves: RHEL-70622
+
 * Tue Jun 21 2022 Michael Catanzaro <mcatanzaro@redhat.com> - 40.4-3
 - BuildRequires: git
 

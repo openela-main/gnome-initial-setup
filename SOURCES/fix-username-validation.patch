@@ -1,0 +1,79 @@
+From 3a1030d8a4f07b63c78ce76185dbe676a7feea7e Mon Sep 17 00:00:00 2001
+From: Xiang Fan <sfanxiang@gmail.com>
+Date: Sat, 29 Dec 2018 22:00:19 +0800
+Subject: [PATCH] account: fix username validation
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Current username validation does not conform to the requirement for
+useradd. For example, upper case letters are allowed in the validation
+but no actual account is created afterwards.
+
+Ideally, Initial Setup would ask the system what the rules are.
+gnome-control-center tries to do this by invoking:
+
+    usermod --login USERNAME -- USERNAME
+
+and checking the exit code to determine whether USERNAME is legal.
+However, at least on Debian-like systems, this method accepts names
+'adduser' will reject, such as 'æ' and 'a.e'. (Debian's accountsservice
+is patched to call 'adduser'.)
+
+https://gitlab.gnome.org/GNOME/gnome-initial-setup/-/issues/117
+---
+ gnome-initial-setup/pages/account/um-utils.c | 25 +++++++++++---------
+ 1 file changed, 14 insertions(+), 11 deletions(-)
+
+diff --git a/gnome-initial-setup/pages/account/um-utils.c b/gnome-initial-setup/pages/account/um-utils.c
+index 39887498..2877d94f 100644
+--- a/gnome-initial-setup/pages/account/um-utils.c
++++ b/gnome-initial-setup/pages/account/um-utils.c
+@@ -128,16 +128,19 @@ is_valid_username (const gchar *username, gboolean parental_controls_enabled, gc
+         valid = TRUE;
+ 
+         if (!in_use && !empty && !too_long) {
+-                /* First char must be a letter, and it must only composed
+-                 * of ASCII letters, digits, and a '.', '-', '_'
++                /* First char must be a lower case letter, and it must only be
++                 * composed of lower case letters, digits, '-', and '_'.
+                  */
+                 for (c = username; *c; c++) {
+-                        if (! ((*c >= 'a' && *c <= 'z') ||
+-                               (*c >= 'A' && *c <= 'Z') ||
+-                               (*c >= '0' && *c <= '9') ||
+-                               (*c == '_') || (*c == '.') ||
+-                               (*c == '-' && c != username)))
+-                           valid = FALSE;
++                        if (c == username) {
++                            if (! (*c >= 'a' && *c <= 'z'))
++                               valid = FALSE;
++                        } else {
++                            if (! ((*c >= 'a' && *c <= 'z') ||
++                                   (*c >= '0' && *c <= '9') ||
++                                   (*c == '_') || (*c == '-')))
++                               valid = FALSE;
++                        }
+                 }
+         }
+ 
+@@ -152,14 +155,14 @@ is_valid_username (const gchar *username, gboolean parental_controls_enabled, gc
+                 else if (too_long) {
+                         *tip = g_strdup_printf (_("The username is too long."));
+                 }
+-                else if (username[0] == '-') {
+-                        *tip = g_strdup (_("The username cannot start with a “-”."));
++                else if (!(username[0] >= 'a' && username[0] <= 'z')) {
++                        *tip = g_strdup (_("The username must start with a lower case letter from a-z."));
+                 }
+                 else if (parental_controls_conflict) {
+                         *tip = g_strdup (_("That username isn’t available. Please try another."));
+                 }
+                 else {
+-                        *tip = g_strdup (_("The username should only consist of upper and lower case letters from a-z, digits and the following characters: . - _"));
++                        *tip = g_strdup (_("The username should only consist of lower case letters from a-z, digits, and the following characters: - _"));
+                 }
+         }
+         else {
+-- 
+GitLab
