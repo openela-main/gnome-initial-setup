@@ -8,18 +8,22 @@
 
 Name:           gnome-initial-setup
 Version:        40.4
-Release:        4%{?dist}
+Release:        6%{?dist}
 Summary:        Bootstrapping your OS
 
 License:        GPLv2+
 URL:            https://wiki.gnome.org/Design/OS/InitialSetup
 Source0:        https://download.gnome.org/sources/%{name}/40/%{name}-%{tarball_version}.tar.xz
 Source1:        vendor.conf
+Source2:        gnome-initial-setup.sysusers.conf
+Source3:        gnome-initial-setup.tmpfiles.conf
 
 # https://bugzilla.redhat.com/show_bug.cgi?id=2097848
 Patch0:         timezones.patch
 # https://issues.redhat.com/browse/RHEL-70622
 Patch1:         fix-username-validation.patch
+# https://issues.redhat.com/browse/RHEL-153859
+Patch2:         disable-webkitgtk-privacy-policy.patch
 
 BuildRequires:  meson
 BuildRequires:  gcc
@@ -47,12 +51,12 @@ BuildRequires:  pkgconfig(gdm)
 BuildRequires:  pkgconfig(iso-codes)
 BuildRequires:  pkgconfig(libgeoclue-2.0) >= %{geoclue_version}
 BuildRequires:  pkgconfig(packagekit-glib2)
-BuildRequires:  pkgconfig(webkit2gtk-4.0)
 BuildRequires:  krb5-devel
 BuildRequires:  ibus-devel
 BuildRequires:  rest-devel
 BuildRequires:  polkit-devel
 BuildRequires:  libsecret-devel
+BuildRequires:  systemd-rpm-macros
 
 # gnome-initial-setup is being run by gdm
 Requires: gdm
@@ -62,7 +66,7 @@ Requires: glib2%{?_isa} >= %{glib_required_version}
 Requires: polkit-js-engine
 Requires: /usr/bin/gkbd-keyboard-display
 
-Requires(pre): shadow-utils
+%{?sysusers_requires_compat}
 
 Provides: user(%name)
 
@@ -86,11 +90,13 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/gnome-initial-setup.d
 
 mkdir -p %{buildroot}%{_datadir}/gnome-initial-setup
 cp %{SOURCE1} %{buildroot}%{_datadir}/gnome-initial-setup/
+mkdir -p %{buildroot}%{_tmpfilesdir}
+install -m 0644 %{SOURCE3} %{buildroot}%{_tmpfilesdir}/%{name}.conf
 
 %find_lang %{name}
 
 %pre
-useradd -rM -d /run/gnome-initial-setup/ -s /sbin/nologin %{name} &>/dev/null || :
+%sysusers_create_compat %{SOURCE2}
 
 %files -f %{name}.lang
 %license COPYING
@@ -104,12 +110,21 @@ useradd -rM -d /run/gnome-initial-setup/ -s /sbin/nologin %{name} &>/dev/null ||
 %{_datadir}/gnome-session/sessions/gnome-initial-setup.session
 %{_datadir}/gnome-shell/modes/initial-setup.json
 %{_datadir}/polkit-1/rules.d/20-gnome-initial-setup.rules
+%{_tmpfilesdir}/%{name}.conf
 %{_userunitdir}/*
 
 %dir %{_datadir}/gnome-initial-setup
 %{_datadir}/gnome-initial-setup/vendor.conf
 
 %changelog
+* Thu Apr 02 2026 Tomas Pelka <tpelka@redhat.com> - 40.4-6
+- Use systemd sysusers config to create user and group
+  Resolves: RHEL-82667
+
+* Mon Mar 09 2026 Nieves Montero <nmontero@redhat.com> - 40.4-5
+- Remove WebKit dependency
+  Resolves: RHEL-153859
+
 * Tue Nov 25 2025 Nieves Montero <nmontero@redhat.com> - 40.4-4
 - Add patch to fix the username validation
   Resolves: RHEL-70622

@@ -1,0 +1,168 @@
+From 22e65368dc63e6e7f5d904ae41898af1aa6bae22 Mon Sep 17 00:00:00 2001
+From: nmontero <nmontero@redhat.com>
+Date: Wed, 11 Mar 2026 13:19:59 +0100
+Subject: [PATCH] Add patch disable-webkitgtk-privacy-policy.patch
+
+---
+ gnome-initial-setup/gis-driver.c                |  7 ++++++-
+ gnome-initial-setup/meson.build                 |  5 ++++-
+ .../pages/privacy/gis-privacy-page.c            | 17 +++++++++++++++++
+ meson.build                                     |  6 ++++++
+ 4 files changed, 33 insertions(+), 2 deletions(-)
+
+diff --git a/gnome-initial-setup/gis-driver.c b/gnome-initial-setup/gis-driver.c
+index 4ecf313d..3819aa92 100644
+--- a/gnome-initial-setup/gis-driver.c
++++ b/gnome-initial-setup/gis-driver.c
+@@ -26,7 +26,10 @@
+ #include <errno.h>
+ #include <locale.h>
+ #include <stdlib.h>
++
++#ifdef HAVE_WEBKITGTK
+ #include <webkit2/webkit2.h>
++#endif
+ 
+ #include "cc-common-language.h"
+ #include "gis-assistant.h"
+@@ -864,11 +867,13 @@ gis_driver_startup (GApplication *app)
+ {
+   GisDriver *driver = GIS_DRIVER (app);
+   GisDriverPrivate *priv = gis_driver_get_instance_private (driver);
+-  WebKitWebContext *context = webkit_web_context_get_default ();
+ 
+   G_APPLICATION_CLASS (gis_driver_parent_class)->startup (app);
+ 
++#ifdef HAVE_WEBKITGTK
++  WebKitWebContext *context = webkit_web_context_get_default ();
+   webkit_web_context_set_sandbox_enabled (context, TRUE);
++#endif
+ 
+   if (priv->mode == GIS_DRIVER_MODE_NEW_USER)
+     connect_to_gdm (driver);
+diff --git a/gnome-initial-setup/meson.build b/gnome-initial-setup/meson.build
+index 75c44831..124af134 100644
+--- a/gnome-initial-setup/meson.build
++++ b/gnome-initial-setup/meson.build
+@@ -49,7 +49,6 @@ dependencies = [
+     dependency ('krb5'),
+     dependency ('libsecret-1', version: '>= 0.18.8'),
+     dependency ('pwquality'),
+-    dependency ('webkit2gtk-4.0', version: '>= 2.26.0'),
+     cheese_dep,
+     cheese_gtk_dep,
+     ibus_dep,
+@@ -57,6 +56,10 @@ dependencies = [
+     libmalcontent_ui_dep,
+ ]
+ 
++if webkitgtk_dep.found()
++  dependencies += webkitgtk_dep
++endif
++
+ executable(
+     'gnome-initial-setup',
+     sources,
+diff --git a/gnome-initial-setup/pages/privacy/gis-privacy-page.c b/gnome-initial-setup/pages/privacy/gis-privacy-page.c
+index 80c40c36..f22971da 100644
+--- a/gnome-initial-setup/pages/privacy/gis-privacy-page.c
++++ b/gnome-initial-setup/pages/privacy/gis-privacy-page.c
+@@ -27,7 +27,9 @@
+ #include "privacy-resources.h"
+ #include "gis-privacy-page.h"
+ 
++#ifdef HAVE_WEBKITGTK
+ #include <webkit2/webkit2.h>
++#endif
+ 
+ #include <locale.h>
+ #include <gtk/gtk.h>
+@@ -69,6 +71,7 @@ update_os_data (GisPrivacyPage *page)
+   gtk_label_set_label (GTK_LABEL (priv->reporting_label), text);
+   g_free (text);
+ 
++#ifdef HAVE_WEBKITGTK
+   if (privacy_policy)
+     {
+       /* Translators: the parameter here is the name of a distribution,
+@@ -84,6 +87,9 @@ update_os_data (GisPrivacyPage *page)
+     {
+       gtk_widget_hide (priv->distro_privacy_policy_label);
+     }
++#else
++  gtk_widget_hide (priv->distro_privacy_policy_label);
++#endif
+ }
+ 
+ static void
+@@ -97,7 +103,9 @@ abrt_appeared_cb (GDBusConnection *connection,
+ 
+   gtk_widget_show (priv->reporting_row);
+   gtk_widget_show (priv->reporting_label);
++#ifdef HAVE_WEBKITGTK
+   gtk_widget_show (priv->distro_privacy_policy_label);
++#endif
+ }
+ 
+ static void
+@@ -132,9 +140,14 @@ gis_privacy_page_constructed (GObject *object)
+ 
+   update_os_data (page);
+ 
++#ifdef HAVE_WEBKITGTK
+   text = g_strdup_printf ("%s <a href='%s'>%s</a>", _("Uses Mozilla Location Service:"), "https://location.services.mozilla.com/privacy", _("Privacy Policy"));
+   gtk_label_set_markup (GTK_LABEL (priv->mozilla_privacy_policy_label), text);
+   g_free (text);
++#else
++  gtk_widget_hide (priv->mozilla_privacy_policy_label);
++  gtk_widget_hide (priv->distro_privacy_policy_label);
++#endif
+ 
+   priv->abrt_watch_id = g_bus_watch_name (G_BUS_TYPE_SYSTEM,
+                                           "org.freedesktop.problems.daemon",
+@@ -180,6 +193,7 @@ gis_privacy_page_apply (GisPage *gis_page,
+   return FALSE;
+ }
+ 
++#ifdef HAVE_WEBKITGTK
+ static void
+ notify_progress_cb (GObject *object, GParamSpec *pspec, gpointer user_data)
+ {
+@@ -239,6 +253,7 @@ activate_link (GtkLabel       *label,
+ 
+   return TRUE;
+ }
++#endif
+ 
+ static void
+ gis_privacy_page_locale_changed (GisPage *page)
+@@ -259,7 +274,9 @@ gis_privacy_page_class_init (GisPrivacyPageClass *klass)
+   gtk_widget_class_bind_template_child_private (GTK_WIDGET_CLASS (klass), GisPrivacyPage, reporting_label);
+   gtk_widget_class_bind_template_child_private (GTK_WIDGET_CLASS (klass), GisPrivacyPage, mozilla_privacy_policy_label);
+   gtk_widget_class_bind_template_child_private (GTK_WIDGET_CLASS (klass), GisPrivacyPage, distro_privacy_policy_label);
++#ifdef HAVE_WEBKITGTK
+   gtk_widget_class_bind_template_callback (GTK_WIDGET_CLASS (klass), activate_link);
++#endif
+ 
+   page_class->page_id = PAGE_ID;
+   page_class->locale_changed = gis_privacy_page_locale_changed;
+diff --git a/meson.build b/meson.build
+index 4f0b8c6d..84e80d10 100644
+--- a/meson.build
++++ b/meson.build
+@@ -31,6 +31,12 @@ conf.set_quoted('G_LOG_DOMAIN', 'InitialSetup')
+ conf.set('GLIB_VERSION_MIN_REQUIRED', 'GLIB_VERSION_2_64')
+ conf.set('GLIB_VERSION_MAX_ALLOWED', 'GLIB_VERSION_2_64')
+ 
++webkitgtk_dep = dependency('webkit2gtk-4.0',
++                           version: '>= 2.26.0',
++                           required: false)
++
++conf.set('HAVE_WEBKITGTK', webkitgtk_dep.found())
++
+ enable_systemd = get_option('systemd')
+ if enable_systemd
+     systemd_dep = dependency('systemd', version: '>= 242', required: false)
+-- 
+2.53.0
+
